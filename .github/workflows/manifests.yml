@@ -1,0 +1,55 @@
+name: manifests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "k8s/**"
+      - "scripts/**"
+      - ".github/workflows/manifests.yml"
+  pull_request:
+    paths:
+      - "k8s/**"
+      - "scripts/**"
+      - ".github/workflows/manifests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kubeconform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      # Render the templated manifests the same way deploy.sh does, then
+      # validate them against the Kubernetes schemas. CRDs (ClusterIssuer,
+      # Traefik Middleware) are checked against the community CRD catalog.
+      - name: Render and validate
+        env:
+          MOODLE_HOST: moodle.203.0.113.10.sslip.io
+          ACME_EMAIL: ci@example.com
+          CLUSTER_ISSUER: letsencrypt-staging
+          MOODLE_IMAGE: ghcr.io/example/moodle-coderunner:ci
+        run: |
+          mkdir -p rendered
+          for f in $(find k8s -name '*.yaml' ! -name '*values.yaml'); do
+            out="rendered/$(echo "$f" | tr '/' '_')"
+            envsubst '${MOODLE_HOST} ${ACME_EMAIL} ${CLUSTER_ISSUER} ${MOODLE_IMAGE}' < "$f" > "$out"
+          done
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck scripts/*.sh docker/moodle/moodle-install.sh

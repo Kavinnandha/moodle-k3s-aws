@@ -1,0 +1,114 @@
+# Moodle web tier. ${MOODLE_HOST} and ${MOODLE_IMAGE} are filled in by
+# scripts/deploy.sh (envsubst), so this file is not applied directly.
+#
+# Labels that the NetworkPolicies rely on:
+#   moodle-k3s/mysql-client: "true"  -> may connect to MySQL
+#   moodle-k3s/jobe-client:  "true"  -> may connect to Jobe
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: moodle-env
+  namespace: moodle
+data:
+  MOODLE_WWWROOT: "https://${MOODLE_HOST}"
+  MOODLE_DB_HOST: mysql.moodle.svc.cluster.local
+  MOODLE_DB_NAME: moodle
+  MOODLE_DB_USER: moodle
+  JOBE_HOST: jobe.jobe.svc.cluster.local
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moodledata
+  namespace: moodle
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: moodle
+  namespace: moodle
+  labels:
+    app.kubernetes.io/name: moodle
+spec:
+  selector:
+    app.kubernetes.io/name: moodle
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moodle
+  namespace: moodle
+  labels:
+    app.kubernetes.io/name: moodle
+    app.kubernetes.io/part-of: moodle
+spec:
+  replicas: 1
+  # moodledata is a ReadWriteOnce local-path volume, so stop the old pod
+  # before starting the new one. Scaling out would need a ReadWriteMany
+  # volume (EFS), which this lab leaves out to save cost. See the README.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: moodle
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moodle
+        app.kubernetes.io/part-of: moodle
+        moodle-k3s/mysql-client: "true"
+        moodle-k3s/jobe-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 33 # www-data
+      containers:
+        - name: moodle
+          image: ${MOODLE_IMAGE}
+          ports:
+            - name: http
+              containerPort: 80
+          envFrom:
+            - configMapRef:
+                name: moodle-env
+          env:
+            - name: MOODLE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moodle-db
+                  key: password
+          readinessProbe:
+            httpGet:
+              path: /login/index.php
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: moodledata
+              mountPath: /var/www/moodledata
+      volumes:
+        - name: moodledata
+          persistentVolumeClaim:
+            claimName: moodledata

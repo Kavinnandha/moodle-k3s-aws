@@ -1,0 +1,61 @@
+# Runs docker/moodle/moodle-install.sh: installs Moodle on an empty DB, or
+# runs the upgrade on an existing one. deploy.sh deletes the previous Job and
+# applies this one before rolling out the Deployment, so the web installer is
+# never exposed publicly.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: moodle-install
+  namespace: moodle
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moodle-install
+        app.kubernetes.io/part-of: moodle
+        moodle-k3s/mysql-client: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        # Write moodledata as www-data so Apache can use the files afterwards.
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+      containers:
+        - name: install
+          image: ${MOODLE_IMAGE}
+          command: ["/usr/local/bin/moodle-install.sh"]
+          envFrom:
+            - configMapRef:
+                name: moodle-env
+          env:
+            - name: MOODLE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moodle-db
+                  key: password
+            - name: MOODLE_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moodle-admin
+                  key: password
+            - name: MOODLE_ADMIN_EMAIL
+              value: "${ACME_EMAIL}"
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          volumeMounts:
+            - name: moodledata
+              mountPath: /var/www/moodledata
+      volumes:
+        - name: moodledata
+          persistentVolumeClaim:
+            claimName: moodledata

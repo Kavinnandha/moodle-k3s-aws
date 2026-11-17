@@ -1,0 +1,117 @@
+# kube-prometheus-stack 93.3.1, trimmed to fit next to Moodle on a 4 GB node.
+#
+# The same tools as the bare-metal setup:
+#   Prometheus      -> prometheus (via the operator)
+#   Grafana         -> grafana (bundled dashboards for nodes, pods, cluster)
+#   Node Exporter   -> prometheus-node-exporter DaemonSet (both nodes)
+#   cAdvisor        -> scraped from the kubelet (k3s embeds cAdvisor), so no
+#                      separate cAdvisor DaemonSet is needed
+#
+# Install: scripts/deploy.sh (helm upgrade --install kps ... -f this file)
+
+# Alertmanager would need a receiver (email/Slack) to be useful. Alerts are
+# still evaluated and visible under Prometheus -> Alerts.
+alertmanager:
+  enabled: false
+
+# k3s runs the scheduler, controller-manager, proxy and etcd/sqlite inside one
+# k3s binary, and they are not exposed on the usual ports. Turn off their
+# scrape targets and rules so they don't show as "down" and fire bogus
+# alerts.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+    windows: false
+    alertmanager: false
+
+windowsMonitoring:
+  enabled: false
+
+kubelet:
+  serviceMonitor:
+    cAdvisor: true
+
+grafana:
+  enabled: true
+  # Admin credentials come from a Secret created by deploy.sh (never in git).
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  # No public Ingress for Grafana: reach it with
+  #   kubectl -n monitoring port-forward svc/kps-grafana 3000:80
+  ingress:
+    enabled: false
+  persistence:
+    enabled: false # dashboards are provisioned from ConfigMaps, nothing to keep
+  defaultDashboardsTimezone: browser
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 30s
+    retention: 3d
+    retentionSize: 4GB
+    # Pick up ServiceMonitors/PodMonitors from any namespace, not only the
+    # ones labelled with this Helm release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+prometheus-node-exporter:
+  # Tolerate every taint so node metrics also come from the Jobe node.
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi

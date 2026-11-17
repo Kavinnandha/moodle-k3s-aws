@@ -1,0 +1,37 @@
+# Traefik (bundled with k3s) terminates TLS. cert-manager issues the
+# certificate from Let's Encrypt using the ${CLUSTER_ISSUER} ClusterIssuer.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: moodle
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: moodle
+  namespace: moodle
+  annotations:
+    cert-manager.io/cluster-issuer: ${CLUSTER_ISSUER}
+    traefik.ingress.kubernetes.io/router.middlewares: moodle-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - ${MOODLE_HOST}
+      secretName: moodle-tls
+  rules:
+    - host: ${MOODLE_HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: moodle
+                port:
+                  name: http

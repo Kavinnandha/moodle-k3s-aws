@@ -1,0 +1,99 @@
+# MySQL 8.4 LTS as a single-replica StatefulSet on a local-path PVC.
+# Credentials come from the moodle-db Secret, which scripts/deploy.sh
+# generates. Nothing secret is in git.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: moodle
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: moodle
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: moodle
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: moodle
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/part-of: moodle
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: mysql
+          image: mysql:8.4.13
+          args:
+            - --innodb-buffer-pool-size=256M
+            - --max-connections=150
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+            - --skip-name-resolve
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moodle-db
+                  key: root-password
+            - name: MYSQL_DATABASE
+              value: moodle
+            - name: MYSQL_USER
+              value: moodle
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moodle-db
+                  key: password
+          ports:
+            - name: mysql
+              containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin -uroot ping']
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin -uroot ping']
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi # MySQL 8.4 idles at ~550 MiB with this config (measured locally)
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi

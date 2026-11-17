@@ -1,0 +1,41 @@
+#!/bin/bash
+# k3s AGENT bootstrap for the dedicated Jobe node. Rendered by Terraform and
+# run once by cloud-init at first boot. Log: /var/log/k3s-bootstrap.log
+#
+# The node is tainted so that only pods which tolerate the taint (Jobe) land
+# here. Moodle, MySQL and monitoring stay on the server node, so student code
+# never shares a kernel with the web tier.
+set -euo pipefail
+exec > >(tee -a /var/log/k3s-bootstrap.log) 2>&1
+
+REGION="${region}"
+TOKEN_PARAM="${token_param}"
+SERVER_IP="${server_ip}"
+K3S_VERSION="${k3s_version}"
+
+echo "==> Installing AWS CLI"
+snap wait system seed.loaded
+snap install aws-cli --classic
+AWS=/snap/bin/aws
+
+echo "==> Reading k3s token from SSM"
+K3S_TOKEN=$($AWS ssm get-parameter --region "$REGION" --name "$TOKEN_PARAM" \
+  --with-decryption --query Parameter.Value --output text)
+
+echo "==> Installing k3s $K3S_VERSION (agent -> $SERVER_IP)"
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/config.yaml <<EOF
+node-label:
+  - "moodle-k3s/role=jobe"
+node-taint:
+  - "moodle-k3s/jobe=true:NoSchedule"
+EOF
+
+# The agent keeps retrying until the server's API is up, so the order in
+# which the two instances boot does not matter.
+curl -sfL --retry 5 https://get.k3s.io | \
+  INSTALL_K3S_VERSION="$K3S_VERSION" \
+  K3S_URL="https://$SERVER_IP:6443" \
+  K3S_TOKEN="$K3S_TOKEN" sh -s - agent
+
+echo "==> Agent bootstrap finished"

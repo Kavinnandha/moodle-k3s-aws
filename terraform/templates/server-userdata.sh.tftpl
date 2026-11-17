@@ -1,0 +1,111 @@
+#!/bin/bash
+# k3s SERVER bootstrap. Rendered by Terraform (compute.tf) and run once by
+# cloud-init at first boot. Log: /var/log/k3s-bootstrap.log
+#
+# Template note: Terraform interpolates $${...}, so bash variables here are
+# written as $VAR (no braces).
+set -euo pipefail
+exec > >(tee -a /var/log/k3s-bootstrap.log) 2>&1
+
+REGION="${region}"
+EIP="${eip}"
+TOKEN_PARAM="${token_param}"
+K3S_VERSION="${k3s_version}"
+
+imds() {
+  local tok
+  tok=$(curl -sS -X PUT http://169.254.169.254/latest/api/token \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+  curl -sS -H "X-aws-ec2-metadata-token: $tok" "http://169.254.169.254/latest/meta-data/$1"
+}
+
+echo "==> Waiting for Elastic IP $EIP to be attached"
+# The EIP is associated just after the instance boots. Swapping the public IP
+# in the middle of a download breaks it, so wait for the swap first.
+for _ in $(seq 1 60); do
+  if [ "$(imds public-ipv4 || true)" = "$EIP" ]; then break; fi
+  sleep 5
+done
+
+echo "==> Installing AWS CLI"
+snap wait system seed.loaded
+snap install aws-cli --classic
+AWS=/snap/bin/aws
+
+echo "==> Reading k3s token from SSM"
+K3S_TOKEN=$($AWS ssm get-parameter --region "$REGION" --name "$TOKEN_PARAM" \
+  --with-decryption --query Parameter.Value --output text)
+
+echo "==> Installing k3s $K3S_VERSION (server)"
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/config.yaml <<EOF
+tls-san:
+  - "$EIP"
+write-kubeconfig-mode: "0600"
+secrets-encryption: true
+node-label:
+  - "moodle-k3s/role=server"
+EOF
+
+curl -sfL --retry 5 https://get.k3s.io | \
+  INSTALL_K3S_VERSION="$K3S_VERSION" K3S_TOKEN="$K3S_TOKEN" sh -s - server
+
+echo "==> Installing backup script + daily systemd timer"
+cat > /usr/local/bin/moodle-backup.sh <<'EOF'
+#!/bin/bash
+# Back up the Moodle database and moodledata to S3.
+# Uses the node's instance role (s3:PutObject on backups/* only).
+# Run by hand with:  sudo systemctl start moodle-backup.service
+set -euo pipefail
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+KUBECTL=/usr/local/bin/kubectl
+AWS=/snap/bin/aws
+BUCKET="${bucket}"
+REGION="${region}"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+DEST="s3://$BUCKET/backups/$STAMP"
+
+echo "Dumping MySQL to $DEST/moodle-db.sql.gz"
+$KUBECTL -n moodle exec mysql-0 -c mysql -- \
+  sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --routines --triggers --databases moodle' \
+  | gzip | $AWS s3 cp --region "$REGION" --only-show-errors - "$DEST/moodle-db.sql.gz"
+
+echo "Archiving moodledata to $DEST/moodledata.tar.gz"
+$KUBECTL -n moodle exec deploy/moodle -c moodle -- \
+  tar -C /var/www \
+    --exclude=moodledata/cache --exclude=moodledata/localcache \
+    --exclude=moodledata/sessions --exclude=moodledata/temp \
+    --exclude=moodledata/trashdir \
+    -czf - moodledata \
+  | $AWS s3 cp --region "$REGION" --only-show-errors - "$DEST/moodledata.tar.gz"
+
+echo "Backup $STAMP complete"
+EOF
+chmod 0750 /usr/local/bin/moodle-backup.sh
+
+cat > /etc/systemd/system/moodle-backup.service <<'EOF'
+[Unit]
+Description=Back up Moodle DB and moodledata to S3
+After=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/moodle-backup.sh
+EOF
+
+cat > /etc/systemd/system/moodle-backup.timer <<'EOF'
+[Unit]
+Description=Daily Moodle backup (02:00 IST)
+
+[Timer]
+OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now moodle-backup.timer
+
+echo "==> Server bootstrap finished"

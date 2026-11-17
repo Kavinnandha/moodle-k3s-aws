@@ -1,0 +1,26 @@
+# Pod Security Admission levels per namespace:
+#   moodle     baseline   (Apache's master process starts as root)
+#   jobe       baseline   (Jobe needs root + setuid to switch to its run-as users)
+#   monitoring privileged (node-exporter needs hostNetwork/hostPID/hostPath)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moodle
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jobe
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: privileged

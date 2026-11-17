@@ -1,0 +1,59 @@
+# Moodle's scheduled tasks (admin/cli/cron.php) every minute. This replaces
+# the host crontab entry used on the bare-metal server.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: moodle-cron
+  namespace: moodle
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: moodle-cron
+            app.kubernetes.io/part-of: moodle
+            moodle-k3s/mysql-client: "true"
+            moodle-k3s/jobe-client: "true"
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsUser: 33
+            runAsGroup: 33
+            fsGroup: 33
+          containers:
+            - name: cron
+              image: ${MOODLE_IMAGE}
+              command: ["php", "/var/www/html/admin/cli/cron.php", "--keep-alive=0"]
+              envFrom:
+                - configMapRef:
+                    name: moodle-env
+              env:
+                - name: MOODLE_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: moodle-db
+                      key: password
+              securityContext:
+                allowPrivilegeEscalation: false
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: moodledata
+                  mountPath: /var/www/moodledata
+          volumes:
+            - name: moodledata
+              persistentVolumeClaim:
+                claimName: moodledata
